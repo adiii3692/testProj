@@ -1,0 +1,26 @@
+server:
+  port: 8080
+  host: "localhost"
+
+database:
+  host: "localhost"
+  port: 5432
+  user: "postgres"
+  password: "postgres"
+  dbname: "service_monitor"
+  sslmode: "disable"
+
+redis:
+  host: "localhost"
+  port: 6379
+  password: ""
+  db: 0
+
+twilio:
+  account_sid: "your_account_sid"
+  auth_token: "your_auth_token"
+  from_phone: "+1234567890"
+
+jwt:
+  secret_key: "your-secret-key"
+  duration: 24 # hours 
