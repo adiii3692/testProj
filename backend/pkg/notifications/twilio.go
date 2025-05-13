@@ -20,7 +20,7 @@ func NewTwilioService(cfg *config.TwilioConfig) *TwilioService {
 
 	return &TwilioService{
 		client:     client,
-		fromNumber: cfg.FromPhone,
+		fromNumber: cfg.FromNumber,
 	}
 }
 

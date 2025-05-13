@@ -8,18 +8,24 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/gin-contrib/cors"
 	"service-monitor/internal/config"
-	// "service-monitor/internal/services" // removed unused import
+	"service-monitor/internal/services"
 	"service-monitor/pkg/database"
 	"service-monitor/pkg/notifications"
 	"service-monitor/internal/models"
 )
 
-var db *sql.DB
+var (
+	db            *sql.DB
+	userService   *services.UserService
+	serviceService *services.ServiceService
+)
 
 func main() {
 	// Load configuration
@@ -27,27 +33,53 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to load config: %v", err)
 	}
+	log.Printf("Configuration loaded successfully")
 
 	// Initialize database
+	log.Printf("Connecting to database at %s:%d", cfg.Database.Host, cfg.Database.Port)
 	db, err = database.NewPostgresDB(&cfg.Database)
 	if err != nil {
 		log.Fatalf("Failed to connect to database: %v", err)
 	}
 	defer db.Close()
+	log.Printf("Database connection established")
+
+	// Run database migrations
+	log.Printf("Running database migrations from directory: migrations")
+	if err := database.RunMigrations(db, "migrations"); err != nil {
+		log.Fatalf("Failed to run migrations: %v", err)
+	}
+	log.Printf("Database migrations completed successfully")
 
 	// Initialize Redis
+	log.Printf("Connecting to Redis at %s:%d", cfg.Redis.Host, cfg.Redis.Port)
 	redis, err := database.NewRedisClient(&cfg.Redis)
 	if err != nil {
 		log.Fatalf("Failed to connect to Redis: %v", err)
 	}
 	defer redis.Close()
+	log.Printf("Redis connection established")
 
 	// Initialize services
 	notifyService := notifications.NewTwilioService(&cfg.Twilio)
+	userService = services.NewUserService(db)
+	serviceService = services.NewServiceService(db)
 	_ = notifyService // keep for future use
+	log.Printf("Services initialized")
 
 	// Initialize router
 	router := gin.Default()
+
+	// Enable CORS for frontend
+	router.Use(cors.New(cors.Config{
+		AllowOrigins:     []string{"http://localhost:3000", "http://localhost:5173"},
+		AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
+		AllowHeaders:     []string{"Origin", "Content-Type", "Accept", "Authorization"},
+		ExposeHeaders:    []string{"Content-Length"},
+		AllowCredentials: true,
+	}))
+
+	log.Printf("Router initialized")
 
 	// API routes
 	api := router.Group("/api")
@@ -137,7 +169,19 @@ func main() {
 // --- Handler Stubs ---
 
 func createService(c *gin.Context) {
-	c.JSON(501, gin.H{"error": "Not implemented"}) // TODO: implement
+	var service models.Service
+	if err := c.ShouldBindJSON(&service); err != nil {
+		c.JSON(400, gin.H{"error": fmt.Sprintf("Invalid request body: %v", err)})
+		return
+	}
+
+	newService, err := serviceService.CreateService(c.Request.Context(), &service)
+	if err != nil {
+		c.JSON(500, gin.H{"error": fmt.Sprintf("Failed to create service: %v", err)})
+		return
+	}
+
+	c.JSON(201, newService)
 }
 
 func listServices(c *gin.Context) {
@@ -182,15 +226,73 @@ func listServices(c *gin.Context) {
 }
 
 func getService(c *gin.Context) {
-	c.JSON(501, gin.H{"error": "Not implemented"}) // TODO: implement
+	id := c.Param("id")
+	serviceID, err := strconv.ParseInt(id, 10, 64)
+	if err != nil {
+		c.JSON(400, gin.H{"error": "Invalid service ID"})
+		return
+	}
+
+	service, err := serviceService.GetService(c.Request.Context(), serviceID)
+	if err != nil {
+		if err.Error() == "service not found" {
+			c.JSON(404, gin.H{"error": "Service not found"})
+			return
+		}
+		c.JSON(500, gin.H{"error": fmt.Sprintf("Failed to get service: %v", err)})
+		return
+	}
+
+	c.JSON(200, service)
 }
 
 func updateService(c *gin.Context) {
-	c.JSON(501, gin.H{"error": "Not implemented"}) // TODO: implement
+	id := c.Param("id")
+	serviceID, err := strconv.ParseInt(id, 10, 64)
+	if err != nil {
+		c.JSON(400, gin.H{"error": "Invalid service ID"})
+		return
+	}
+
+	var service models.Service
+	if err := c.ShouldBindJSON(&service); err != nil {
+		c.JSON(400, gin.H{"error": fmt.Sprintf("Invalid request body: %v", err)})
+		return
+	}
+
+	service.ID = serviceID
+	updatedService, err := serviceService.UpdateService(c.Request.Context(), &service)
+	if err != nil {
+		if err.Error() == "service not found" {
+			c.JSON(404, gin.H{"error": "Service not found"})
+			return
+		}
+		c.JSON(500, gin.H{"error": fmt.Sprintf("Failed to update service: %v", err)})
+		return
+	}
+
+	c.JSON(200, updatedService)
 }
 
 func deleteService(c *gin.Context) {
-	c.JSON(501, gin.H{"error": "Not implemented"}) // TODO: implement
+	id := c.Param("id")
+	serviceID, err := strconv.ParseInt(id, 10, 64)
+	if err != nil {
+		c.JSON(400, gin.H{"error": "Invalid service ID"})
+		return
+	}
+
+	err = serviceService.DeleteService(c.Request.Context(), serviceID)
+	if err != nil {
+		if err.Error() == "service not found" {
+			c.JSON(404, gin.H{"error": "Service not found"})
+			return
+		}
+		c.JSON(500, gin.H{"error": fmt.Sprintf("Failed to delete service: %v", err)})
+		return
+	}
+
+	c.Status(204)
 }
 
 func checkServiceHealth(c *gin.Context) {
@@ -266,7 +368,41 @@ func verifyAlert(c *gin.Context) {
 }
 
 func createUser(c *gin.Context) {
-	c.JSON(501, gin.H{"error": "Not implemented"}) // TODO: implement
+	var user models.User
+	if err := c.ShouldBindJSON(&user); err != nil {
+		log.Printf("Invalid request body: %v", err)
+		c.JSON(400, gin.H{"error": fmt.Sprintf("Invalid request body: %v", err)})
+		return
+	}
+
+	// Validate required fields
+	if user.Name == "" {
+		c.JSON(400, gin.H{"error": "Name is required"})
+		return
+	}
+	if user.Email == "" {
+		c.JSON(400, gin.H{"error": "Email is required"})
+		return
+	}
+	if user.Password == "" {
+		c.JSON(400, gin.H{"error": "Password is required"})
+		return
+	}
+	if user.Phone == "" {
+		c.JSON(400, gin.H{"error": "Phone is required"})
+		return
+	}
+
+	log.Printf("Creating user: %s (%s)", user.Name, user.Email)
+	newUser, err := userService.CreateUser(c.Request.Context(), &user)
+	if err != nil {
+		log.Printf("Failed to create user: %v", err)
+		c.JSON(500, gin.H{"error": fmt.Sprintf("Failed to create user: %v", err)})
+		return
+	}
+
+	log.Printf("User created successfully with ID: %d", newUser.ID)
+	c.JSON(201, newUser)
 }
 
 func listUsers(c *gin.Context) {
